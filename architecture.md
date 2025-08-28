@@ -97,6 +97,41 @@ The system uses a two-tier approach to find Greenhouse-enabled companies:
 5. **Resilient Error Handling**: Concurrent error isolation ensures failed companies don't stop the search
 6. **Real-time Progress Tracking**: Shows completion status across all concurrent operations
 
+## Job Application System (Browser Automation)
+
+Since individual job seekers cannot access Greenhouse's direct API, the system implements browser automation for job applications:
+
+### Phase 1: Interactive Job Selection
+- **Enhanced Results Display**: Jobs shown with selection numbers
+- **Interactive Interface**: Users input job number to select for application
+- **Job Details View**: Full job description, requirements, and company information
+- **Application Confirmation**: User confirms before proceeding to application
+
+### Phase 2: Browser Automation (Planned)
+- **Session Management**: Opens browser for user login to Greenhouse
+- **Form Automation**: Uses `thirtyfour` WebDriver to fill application forms
+- **Resume Integration**: Leverages user's existing uploaded resume on Greenhouse
+- **Multi-Application Support**: Maintains session for applying to multiple jobs
+
+### Browser Automation Architecture
+```rust
+struct JobApplicationSystem {
+    jobs: Vec<JobResult>,
+    selected_job: Option<JobResult>,
+}
+
+// Phase 2 components (planned)
+struct JobApplicationBot {
+    driver: WebDriver,
+    session_active: bool,
+}
+```
+
+### Dependencies for Browser Automation
+- **`thirtyfour`**: Selenium WebDriver client for form automation
+- **ChromeDriver**: Browser automation driver
+- **Session persistence**: Maintains login state across applications
+
 ## Usage Pattern
 
-The tool is designed for job seekers who want to search across multiple companies simultaneously. It targets a specific job title ("principal product manager") and location ("94555" - Fremont, CA area) but can be easily modified for different search criteria.
+The tool is designed for job seekers who want to search across multiple companies simultaneously and apply to selected positions through an automated browser interface. It targets specific job criteria but can be easily modified for different search parameters. The system supports both job discovery and application submission in a streamlined workflow.

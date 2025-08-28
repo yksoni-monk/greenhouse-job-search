@@ -5,6 +5,7 @@ use tokio;
 use scraper::{Html, Selector};
 use std::error::Error;
 use std::time::Duration;
+use std::io::{self, Write};
 
 #[derive(Debug, Deserialize, Serialize)]
 struct Job {
@@ -32,12 +33,138 @@ struct JobsResponse {
     jobs: Vec<Job>,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 struct JobResult {
     title: String,
     company: String,
     date_posted: String,
     url: String,
+}
+
+struct JobApplicationSystem {
+    jobs: Vec<JobResult>,
+    selected_job: Option<JobResult>,
+}
+
+impl JobApplicationSystem {
+    fn new(jobs: Vec<JobResult>) -> Self {
+        Self {
+            jobs,
+            selected_job: None,
+        }
+    }
+
+    fn display_jobs_for_selection(&self) {
+        if self.jobs.is_empty() {
+            println!("❌ No jobs available for application.");
+            return;
+        }
+
+        println!("\n🎯 JOBS AVAILABLE FOR APPLICATION");
+        println!("=================================");
+        
+        for (i, job) in self.jobs.iter().enumerate() {
+            println!("{}. 📋 {}", i + 1, job.title);
+            println!("   🏢 {} | 📅 {}", job.company, job.date_posted);
+            println!();
+        }
+        
+        println!("💡 Enter job number to view details and apply (1-{}), or 'q' to quit", self.jobs.len());
+    }
+
+    fn get_user_job_selection(&self) -> Result<Option<usize>, String> {
+        print!("Your selection: ");
+        io::stdout().flush().unwrap();
+        
+        let mut input = String::new();
+        io::stdin().read_line(&mut input).map_err(|e| format!("Input error: {}", e))?;
+        
+        let input = input.trim();
+        
+        if input.to_lowercase() == "q" || input.to_lowercase() == "quit" {
+            return Ok(None);
+        }
+        
+        match input.parse::<usize>() {
+            Ok(num) if num >= 1 && num <= self.jobs.len() => Ok(Some(num - 1)),
+            Ok(_) => Err(format!("Please enter a number between 1 and {}", self.jobs.len())),
+            Err(_) => Err("Please enter a valid number or 'q' to quit".to_string()),
+        }
+    }
+
+    fn display_job_details(&self, job_index: usize) {
+        let job = &self.jobs[job_index];
+        
+        println!("\n📋 JOB DETAILS");
+        println!("================");
+        println!("📌 Title: {}", job.title);
+        println!("🏢 Company: {}", job.company);
+        println!("📅 Date Posted: {}", job.date_posted);
+        println!("🔗 URL: {}", job.url);
+        println!();
+    }
+
+    fn confirm_application(&self, job_index: usize) -> bool {
+        let job = &self.jobs[job_index];
+        
+        println!("🤔 Do you want to apply to this position?");
+        println!("   📋 {}", job.title);
+        println!("   🏢 {}", job.company);
+        
+        loop {
+            print!("\nApply to this job? (y/n): ");
+            io::stdout().flush().unwrap();
+            
+            let mut input = String::new();
+            io::stdin().read_line(&mut input).unwrap();
+            
+            match input.trim().to_lowercase().as_str() {
+                "y" | "yes" => return true,
+                "n" | "no" => return false,
+                _ => println!("Please enter 'y' for yes or 'n' for no"),
+            }
+        }
+    }
+
+    fn select_and_apply_to_job(&mut self) -> Result<bool, String> {
+        loop {
+            self.display_jobs_for_selection();
+            
+            match self.get_user_job_selection()? {
+                Some(job_index) => {
+                    self.display_job_details(job_index);
+                    
+                    if self.confirm_application(job_index) {
+                        self.selected_job = Some(self.jobs[job_index].clone());
+                        
+                        // Phase 1: Just show selection confirmation
+                        println!("\n✅ JOB SELECTED FOR APPLICATION");
+                        println!("📋 {}", self.selected_job.as_ref().unwrap().title);
+                        println!("🏢 {}", self.selected_job.as_ref().unwrap().company);
+                        println!("\n🚧 Phase 2 (Browser Automation) coming soon...");
+                        println!("For now, you can manually apply at: {}", self.selected_job.as_ref().unwrap().url);
+                        
+                        // Ask if user wants to select another job
+                        print!("\nWould you like to select another job for application? (y/n): ");
+                        io::stdout().flush().unwrap();
+                        
+                        let mut input = String::new();
+                        io::stdin().read_line(&mut input).unwrap();
+                        
+                        if !input.trim().to_lowercase().starts_with('y') {
+                            return Ok(true);
+                        }
+                    } else {
+                        println!("❌ Application cancelled. Returning to job list...\n");
+                    }
+                }
+                None => {
+                    println!("👋 Exiting job application system...");
+                    return Ok(false);
+                }
+            }
+        }
+    }
 }
 
 struct GreenhouseJobSearcher {
@@ -271,8 +398,8 @@ impl GreenhouseJobSearcher {
             .map_err(|e| e.into())
     }
 
-    // Main search function
-    async fn search_jobs(&mut self, keyword: &str, location: &str) -> Result<(), Box<dyn Error>> {
+    // Main search function - now returns jobs for application interface
+    async fn search_jobs(&mut self, keyword: &str, location: &str) -> Result<Vec<JobResult>, Box<dyn Error>> {
         println!("🚀 Starting job search...");
         println!("🔍 Keyword: {}", keyword);
         println!("📍 Location: {}", location);
@@ -328,11 +455,11 @@ impl GreenhouseJobSearcher {
         }
 
         println!("\n");
-        self.display_results(all_jobs);
-        Ok(())
+        self.display_results(&all_jobs);
+        Ok(all_jobs)
     }
 
-    fn display_results(&self, jobs: Vec<JobResult>) {
+    fn display_results(&self, jobs: &Vec<JobResult>) {
         println!("📊 SEARCH RESULTS");
         println!("=================");
         
@@ -355,8 +482,8 @@ impl GreenhouseJobSearcher {
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error>> {
-    println!("🌱 Greenhouse Job Search Tool");
-    println!("==============================\n");
+    println!("🌱 Greenhouse Job Search & Application Tool");
+    println!("==========================================\n");
 
     let mut searcher = GreenhouseJobSearcher::new();
     
@@ -364,7 +491,33 @@ async fn main() -> Result<(), Box<dyn Error>> {
     let keyword = "principal product manager";
     let location = "94555"; // Fremont, CA area
     
-    searcher.search_jobs(keyword, location).await?;
+    // Phase 1: Search for jobs
+    let jobs = searcher.search_jobs(keyword, location).await?;
+    
+    // Phase 1: Interactive job selection and application interface
+    if !jobs.is_empty() {
+        println!("\n🎯 INTERACTIVE JOB APPLICATION");
+        println!("Found {} matching jobs. Would you like to apply to any of them?", jobs.len());
+        
+        print!("Enter job application mode? (y/n): ");
+        io::stdout().flush().unwrap();
+        
+        let mut input = String::new();
+        io::stdin().read_line(&mut input)?;
+        
+        if input.trim().to_lowercase().starts_with('y') {
+            let mut app_system = JobApplicationSystem::new(jobs);
+            
+            match app_system.select_and_apply_to_job() {
+                Ok(_) => println!("\n✅ Job application session completed!"),
+                Err(e) => println!("❌ Error in job application: {}", e),
+            }
+        } else {
+            println!("👋 Search completed. No applications submitted.");
+        }
+    } else {
+        println!("❌ No jobs found. Try different search criteria.");
+    }
     
     Ok(())
 }
