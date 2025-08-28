@@ -6,6 +6,19 @@ use scraper::{Html, Selector};
 use std::error::Error;
 use std::time::Duration;
 use std::io::{self, Write};
+use crossterm::{
+    event::{self, Event, KeyCode},
+    terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
+    ExecutableCommand,
+};
+use ratatui::{
+    backend::CrosstermBackend,
+    layout::{Constraint, Direction, Layout},
+    style::{Color, Modifier, Style},
+    text::{Line, Span},
+    widgets::{Block, Borders, List, ListItem, ListState, Paragraph},
+    Terminal, Frame,
+};
 
 #[derive(Debug, Deserialize, Serialize)]
 struct Job {
@@ -43,124 +56,367 @@ struct JobResult {
 
 struct JobApplicationSystem {
     jobs: Vec<JobResult>,
-    selected_job: Option<JobResult>,
+    list_state: ListState,
+    current_view: AppView,
+    selected_job_index: Option<usize>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+enum AppView {
+    JobList,
+    JobDetails,
+    ConfirmApplication,
+    ApplicationComplete,
 }
 
 impl JobApplicationSystem {
     fn new(jobs: Vec<JobResult>) -> Self {
+        let mut list_state = ListState::default();
+        if !jobs.is_empty() {
+            list_state.select(Some(0));
+        }
+        
         Self {
             jobs,
-            selected_job: None,
+            list_state,
+            current_view: AppView::JobList,
+            selected_job_index: None,
         }
     }
 
-    fn display_jobs_for_selection(&self) {
-        if self.jobs.is_empty() {
-            println!("❌ No jobs available for application.");
-            return;
-        }
-
-        println!("\n🎯 JOBS AVAILABLE FOR APPLICATION");
-        println!("=================================");
-        
-        for (i, job) in self.jobs.iter().enumerate() {
-            println!("{}. 📋 {}", i + 1, job.title);
-            println!("   🏢 {} | 📅 {}", job.company, job.date_posted);
-            println!();
-        }
-        
-        println!("💡 Enter job number to view details and apply (1-{}), or 'q' to quit", self.jobs.len());
+    fn next(&mut self) {
+        let i = match self.list_state.selected() {
+            Some(i) => {
+                if i >= self.jobs.len() - 1 {
+                    0
+                } else {
+                    i + 1
+                }
+            }
+            None => 0,
+        };
+        self.list_state.select(Some(i));
     }
 
-    fn get_user_job_selection(&self) -> Result<Option<usize>, String> {
-        print!("Your selection: ");
-        io::stdout().flush().unwrap();
-        
-        let mut input = String::new();
-        io::stdin().read_line(&mut input).map_err(|e| format!("Input error: {}", e))?;
-        
-        let input = input.trim();
-        
-        if input.to_lowercase() == "q" || input.to_lowercase() == "quit" {
-            return Ok(None);
-        }
-        
-        match input.parse::<usize>() {
-            Ok(num) if num >= 1 && num <= self.jobs.len() => Ok(Some(num - 1)),
-            Ok(_) => Err(format!("Please enter a number between 1 and {}", self.jobs.len())),
-            Err(_) => Err("Please enter a valid number or 'q' to quit".to_string()),
+    fn previous(&mut self) {
+        let i = match self.list_state.selected() {
+            Some(i) => {
+                if i == 0 {
+                    self.jobs.len() - 1
+                } else {
+                    i - 1
+                }
+            }
+            None => 0,
+        };
+        self.list_state.select(Some(i));
+    }
+
+    fn select_current_job(&mut self) {
+        self.selected_job_index = self.list_state.selected();
+        self.current_view = AppView::JobDetails;
+    }
+
+    fn back_to_list(&mut self) {
+        self.current_view = AppView::JobList;
+    }
+
+    fn confirm_application(&mut self) {
+        self.current_view = AppView::ConfirmApplication;
+    }
+
+    fn apply_to_job(&mut self) {
+        self.current_view = AppView::ApplicationComplete;
+    }
+
+    fn render(&mut self, f: &mut Frame) {
+        match self.current_view {
+            AppView::JobList => self.render_job_list(f),
+            AppView::JobDetails => self.render_job_details(f),
+            AppView::ConfirmApplication => self.render_confirm_application(f),
+            AppView::ApplicationComplete => self.render_application_complete(f),
         }
     }
 
-    fn display_job_details(&self, job_index: usize) {
-        let job = &self.jobs[job_index];
-        
-        println!("\n📋 JOB DETAILS");
-        println!("================");
-        println!("📌 Title: {}", job.title);
-        println!("🏢 Company: {}", job.company);
-        println!("📅 Date Posted: {}", job.date_posted);
-        println!("🔗 URL: {}", job.url);
-        println!();
+    fn render_job_list(&mut self, f: &mut Frame) {
+        let chunks = Layout::default()
+            .direction(Direction::Vertical)
+            .margin(1)
+            .constraints([
+                Constraint::Length(3),
+                Constraint::Min(0),
+                Constraint::Length(3),
+            ])
+            .split(f.area());
+
+        // Title
+        let title = Paragraph::new("🎯 JOB BROWSER - Interactive Mode")
+            .block(Block::default().borders(Borders::ALL))
+            .style(Style::default().fg(Color::Cyan));
+        f.render_widget(title, chunks[0]);
+
+        // Job list
+        let items: Vec<ListItem> = self.jobs
+            .iter()
+            .enumerate()
+            .map(|(_i, job)| {
+                let content = vec![
+                    Line::from(vec![
+                        Span::styled("📋 ", Style::default().fg(Color::Blue)),
+                        Span::raw(&job.title),
+                    ]),
+                    Line::from(vec![
+                        Span::raw("   🏢 "),
+                        Span::styled(&job.company, Style::default().fg(Color::Green)),
+                    ]),
+                ];
+                ListItem::new(content)
+            })
+            .collect();
+
+        let jobs_list = List::new(items)
+            .block(Block::default().borders(Borders::ALL).title("Jobs"))
+            .highlight_style(Style::default().bg(Color::LightBlue).fg(Color::Black).add_modifier(Modifier::BOLD))
+            .highlight_symbol("→ ");
+
+        f.render_stateful_widget(jobs_list, chunks[1], &mut self.list_state);
+
+        // Controls
+        let controls = Paragraph::new("🎮 ↑/↓: Navigate | Enter: View Details | q: Quit")
+            .block(Block::default().borders(Borders::ALL))
+            .style(Style::default().fg(Color::Gray));
+        f.render_widget(controls, chunks[2]);
     }
 
-    fn confirm_application(&self, job_index: usize) -> bool {
-        let job = &self.jobs[job_index];
-        
-        println!("🤔 Do you want to apply to this position?");
-        println!("   📋 {}", job.title);
-        println!("   🏢 {}", job.company);
-        
-        loop {
-            print!("\nApply to this job? (y/n): ");
-            io::stdout().flush().unwrap();
-            
-            let mut input = String::new();
-            io::stdin().read_line(&mut input).unwrap();
-            
-            match input.trim().to_lowercase().as_str() {
-                "y" | "yes" => return true,
-                "n" | "no" => return false,
-                _ => println!("Please enter 'y' for yes or 'n' for no"),
+    fn render_job_details(&mut self, f: &mut Frame) {
+        if let Some(index) = self.selected_job_index {
+            if let Some(job) = self.jobs.get(index) {
+                let chunks = Layout::default()
+                    .direction(Direction::Vertical)
+                    .margin(1)
+                    .constraints([
+                        Constraint::Length(3),
+                        Constraint::Min(0),
+                        Constraint::Length(3),
+                    ])
+                    .split(f.area());
+
+                // Title
+                let title = Paragraph::new("📋 JOB DETAILS")
+                    .block(Block::default().borders(Borders::ALL))
+                    .style(Style::default().fg(Color::Cyan));
+                f.render_widget(title, chunks[0]);
+
+                // Job details
+                let details = vec![
+                    Line::from(vec![
+                        Span::styled("📌 Title: ", Style::default().fg(Color::Yellow)),
+                        Span::raw(&job.title),
+                    ]),
+                    Line::from(""),
+                    Line::from(vec![
+                        Span::styled("🏢 Company: ", Style::default().fg(Color::Green)),
+                        Span::raw(&job.company),
+                    ]),
+                    Line::from(""),
+                    Line::from(vec![
+                        Span::styled("📅 Date Posted: ", Style::default().fg(Color::Blue)),
+                        Span::raw(&job.date_posted),
+                    ]),
+                    Line::from(""),
+                    Line::from(vec![
+                        Span::styled("🔗 URL: ", Style::default().fg(Color::Magenta)),
+                        Span::raw(&job.url),
+                    ]),
+                ];
+
+                let details_paragraph = Paragraph::new(details)
+                    .block(Block::default().borders(Borders::ALL))
+                    .wrap(ratatui::widgets::Wrap { trim: true });
+                f.render_widget(details_paragraph, chunks[1]);
+
+                // Controls
+                let controls = Paragraph::new("🎮 a: Apply | b: Back to List | q: Quit")
+                    .block(Block::default().borders(Borders::ALL))
+                    .style(Style::default().fg(Color::Gray));
+                f.render_widget(controls, chunks[2]);
             }
         }
     }
 
-    fn select_and_apply_to_job(&mut self) -> Result<bool, String> {
+    fn render_confirm_application(&mut self, f: &mut Frame) {
+        if let Some(index) = self.selected_job_index {
+            if let Some(job) = self.jobs.get(index) {
+                let chunks = Layout::default()
+                    .direction(Direction::Vertical)
+                    .margin(1)
+                    .constraints([
+                        Constraint::Length(3),
+                        Constraint::Min(0),
+                        Constraint::Length(3),
+                    ])
+                    .split(f.area());
+
+                // Title
+                let title = Paragraph::new("🤔 CONFIRM APPLICATION")
+                    .block(Block::default().borders(Borders::ALL))
+                    .style(Style::default().fg(Color::Red));
+                f.render_widget(title, chunks[0]);
+
+                // Confirmation details
+                let details = vec![
+                    Line::from(""),
+                    Line::from(vec![
+                        Span::styled("📋 ", Style::default().fg(Color::Blue)),
+                        Span::styled(&job.title, Style::default().add_modifier(Modifier::BOLD)),
+                    ]),
+                    Line::from(""),
+                    Line::from(vec![
+                        Span::styled("🏢 ", Style::default().fg(Color::Green)),
+                        Span::raw(&job.company),
+                    ]),
+                    Line::from(""),
+                    Line::from(vec![
+                        Span::styled("🔗 ", Style::default().fg(Color::Magenta)),
+                        Span::raw(&job.url),
+                    ]),
+                    Line::from(""),
+                    Line::from(""),
+                    Line::from(vec![
+                        Span::styled("Do you want to apply to this position?", Style::default().fg(Color::Yellow)),
+                    ]),
+                ];
+
+                let details_paragraph = Paragraph::new(details)
+                    .block(Block::default().borders(Borders::ALL))
+                    .wrap(ratatui::widgets::Wrap { trim: true });
+                f.render_widget(details_paragraph, chunks[1]);
+
+                // Controls
+                let controls = Paragraph::new("🎮 y: Yes, Apply | n: No, Go Back")
+                    .block(Block::default().borders(Borders::ALL))
+                    .style(Style::default().fg(Color::Gray));
+                f.render_widget(controls, chunks[2]);
+            }
+        }
+    }
+
+    fn render_application_complete(&mut self, f: &mut Frame) {
+        if let Some(index) = self.selected_job_index {
+            if let Some(job) = self.jobs.get(index) {
+                let chunks = Layout::default()
+                    .direction(Direction::Vertical)
+                    .margin(1)
+                    .constraints([
+                        Constraint::Length(3),
+                        Constraint::Min(0),
+                        Constraint::Length(3),
+                    ])
+                    .split(f.area());
+
+                // Title
+                let title = Paragraph::new("✅ JOB SELECTED FOR APPLICATION")
+                    .block(Block::default().borders(Borders::ALL))
+                    .style(Style::default().fg(Color::Green));
+                f.render_widget(title, chunks[0]);
+
+                // Success message
+                let details = vec![
+                    Line::from(""),
+                    Line::from(vec![
+                        Span::styled("📋 ", Style::default().fg(Color::Blue)),
+                        Span::styled(&job.title, Style::default().add_modifier(Modifier::BOLD)),
+                    ]),
+                    Line::from(""),
+                    Line::from(vec![
+                        Span::styled("🏢 ", Style::default().fg(Color::Green)),
+                        Span::raw(&job.company),
+                    ]),
+                    Line::from(""),
+                    Line::from(""),
+                    Line::from(vec![
+                        Span::styled("🚧 Phase 2 (Browser Automation) coming soon...", Style::default().fg(Color::Yellow)),
+                    ]),
+                    Line::from(""),
+                    Line::from("For now, you can manually apply at:"),
+                    Line::from(vec![
+                        Span::styled(&job.url, Style::default().fg(Color::Blue).add_modifier(Modifier::UNDERLINED)),
+                    ]),
+                ];
+
+                let details_paragraph = Paragraph::new(details)
+                    .block(Block::default().borders(Borders::ALL))
+                    .wrap(ratatui::widgets::Wrap { trim: true });
+                f.render_widget(details_paragraph, chunks[1]);
+
+                // Controls
+                let controls = Paragraph::new("🎮 Press any key to continue...")
+                    .block(Block::default().borders(Borders::ALL))
+                    .style(Style::default().fg(Color::Gray));
+                f.render_widget(controls, chunks[2]);
+            }
+        }
+    }
+
+    fn run(&mut self) -> Result<(), Box<dyn Error>> {
+        // Setup terminal
+        enable_raw_mode()?;
+        io::stdout().execute(EnterAlternateScreen)?;
+        let backend = CrosstermBackend::new(io::stdout());
+        let mut terminal = Terminal::new(backend)?;
+
+        let result = self.run_app(&mut terminal);
+
+        // Cleanup
+        disable_raw_mode()?;
+        io::stdout().execute(LeaveAlternateScreen)?;
+
+        result
+    }
+
+    fn run_app(&mut self, terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> Result<(), Box<dyn Error>> {
+        if self.jobs.is_empty() {
+            println!("❌ No jobs available for application.");
+            return Ok(());
+        }
+
         loop {
-            self.display_jobs_for_selection();
-            
-            match self.get_user_job_selection()? {
-                Some(job_index) => {
-                    self.display_job_details(job_index);
-                    
-                    if self.confirm_application(job_index) {
-                        self.selected_job = Some(self.jobs[job_index].clone());
-                        
-                        // Phase 1: Just show selection confirmation
-                        println!("\n✅ JOB SELECTED FOR APPLICATION");
-                        println!("📋 {}", self.selected_job.as_ref().unwrap().title);
-                        println!("🏢 {}", self.selected_job.as_ref().unwrap().company);
-                        println!("\n🚧 Phase 2 (Browser Automation) coming soon...");
-                        println!("For now, you can manually apply at: {}", self.selected_job.as_ref().unwrap().url);
-                        
-                        // Ask if user wants to select another job
-                        print!("\nWould you like to select another job for application? (y/n): ");
-                        io::stdout().flush().unwrap();
-                        
-                        let mut input = String::new();
-                        io::stdin().read_line(&mut input).unwrap();
-                        
-                        if !input.trim().to_lowercase().starts_with('y') {
-                            return Ok(true);
+            terminal.draw(|f| self.render(f))?;
+
+            if let Event::Key(key) = event::read()? {
+                match self.current_view {
+                    AppView::JobList => {
+                        match key.code {
+                            KeyCode::Char('q') | KeyCode::Esc => return Ok(()),
+                            KeyCode::Down => self.next(),
+                            KeyCode::Up => self.previous(),
+                            KeyCode::Enter => self.select_current_job(),
+                            _ => {}
                         }
-                    } else {
-                        println!("❌ Application cancelled. Returning to job list...\n");
                     }
-                }
-                None => {
-                    println!("👋 Exiting job application system...");
-                    return Ok(false);
+                    AppView::JobDetails => {
+                        match key.code {
+                            KeyCode::Char('q') | KeyCode::Esc => return Ok(()),
+                            KeyCode::Char('b') => self.back_to_list(),
+                            KeyCode::Char('a') => self.confirm_application(),
+                            _ => {}
+                        }
+                    }
+                    AppView::ConfirmApplication => {
+                        match key.code {
+                            KeyCode::Char('q') | KeyCode::Esc => return Ok(()),
+                            KeyCode::Char('y') => self.apply_to_job(),
+                            KeyCode::Char('n') => self.back_to_list(),
+                            _ => {}
+                        }
+                    }
+                    AppView::ApplicationComplete => {
+                        // Any key to continue browsing or quit
+                        match key.code {
+                            KeyCode::Char('q') | KeyCode::Esc => return Ok(()),
+                            _ => self.back_to_list(),
+                        }
+                    }
                 }
             }
         }
@@ -391,12 +647,6 @@ impl GreenhouseJobSearcher {
         Ok(matching_jobs)
     }
 
-    // Search jobs for a specific board token
-    async fn search_jobs_for_board(&self, board_token: &str, keyword: &str, location: &str) 
-        -> Result<Vec<JobResult>, Box<dyn Error>> {
-        Self::search_jobs_for_board_static(&self.client, board_token, keyword, location).await
-            .map_err(|e| e.into())
-    }
 
     // Main search function - now returns jobs for application interface
     async fn search_jobs(&mut self, keyword: &str, location: &str) -> Result<Vec<JobResult>, Box<dyn Error>> {
@@ -494,12 +744,12 @@ async fn main() -> Result<(), Box<dyn Error>> {
     // Phase 1: Search for jobs
     let jobs = searcher.search_jobs(keyword, location).await?;
     
-    // Phase 1: Interactive job selection and application interface
+    // Phase 1: Interactive job browser
     if !jobs.is_empty() {
-        println!("\n🎯 INTERACTIVE JOB APPLICATION");
-        println!("Found {} matching jobs. Would you like to apply to any of them?", jobs.len());
+        println!("\n✅ SEARCH COMPLETE");
+        println!("Found {} matching jobs!", jobs.len());
         
-        print!("Enter job application mode? (y/n): ");
+        print!("Enter interactive job browser? (y/n): ");
         io::stdout().flush().unwrap();
         
         let mut input = String::new();
@@ -508,12 +758,12 @@ async fn main() -> Result<(), Box<dyn Error>> {
         if input.trim().to_lowercase().starts_with('y') {
             let mut app_system = JobApplicationSystem::new(jobs);
             
-            match app_system.select_and_apply_to_job() {
-                Ok(_) => println!("\n✅ Job application session completed!"),
-                Err(e) => println!("❌ Error in job application: {}", e),
+            match app_system.run() {
+                Ok(_) => println!("\n✅ Job browser session completed!"),
+                Err(e) => println!("❌ Error in job browser: {}", e),
             }
         } else {
-            println!("👋 Search completed. No applications submitted.");
+            println!("👋 Search completed. Use interactive browser next time to apply!");
         }
     } else {
         println!("❌ No jobs found. Try different search criteria.");
