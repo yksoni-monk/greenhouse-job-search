@@ -152,14 +152,14 @@ impl GreenhouseJobSearcher {
         None
     }
 
-    // Search jobs for a specific board token
-    async fn search_jobs_for_board(&self, board_token: &str, keyword: &str, location: &str) 
-        -> Result<Vec<JobResult>, Box<dyn Error>> {
+    // Static version for concurrent execution
+    async fn search_jobs_for_board_static(client: &reqwest::Client, board_token: &str, keyword: &str, location: &str) 
+        -> Result<Vec<JobResult>, String> {
         
         // Use content=true to get department information
         let api_url = format!("https://boards-api.greenhouse.io/v1/boards/{}/jobs?content=true", board_token);
         
-        let response = match self.client.get(&api_url).send().await {
+        let response = match client.get(&api_url).send().await {
             Ok(resp) => {
                 if !resp.status().is_success() {
                     // Print debug info for failed requests occasionally
@@ -264,6 +264,13 @@ impl GreenhouseJobSearcher {
         Ok(matching_jobs)
     }
 
+    // Search jobs for a specific board token
+    async fn search_jobs_for_board(&self, board_token: &str, keyword: &str, location: &str) 
+        -> Result<Vec<JobResult>, Box<dyn Error>> {
+        Self::search_jobs_for_board_static(&self.client, board_token, keyword, location).await
+            .map_err(|e| e.into())
+    }
+
     // Main search function
     async fn search_jobs(&mut self, keyword: &str, location: &str) -> Result<(), Box<dyn Error>> {
         println!("🚀 Starting job search...");
@@ -274,27 +281,50 @@ impl GreenhouseJobSearcher {
         // First, find board tokens
         self.find_board_tokens_via_google().await?;
 
-        let mut all_jobs = Vec::new();
         let total_boards = self.board_tokens.len();
-        let mut processed = 0;
+        println!("🔄 Searching jobs across {} companies concurrently...", total_boards);
 
-        println!("🔄 Searching jobs across {} companies...", total_boards);
+        // Create concurrent tasks for all board tokens
+        let mut tasks = Vec::new();
+        let client = self.client.clone();
+        let keyword = keyword.to_string();
+        let location = location.to_string();
 
-        for board_token in &self.board_tokens.clone() {
-            processed += 1;
-            print!("\rProgress: {}/{} - Checking {}...", processed, total_boards, board_token);
+        for board_token in self.board_tokens.iter() {
+            let client = client.clone();
+            let board_token = board_token.clone();
+            let keyword = keyword.clone();
+            let location = location.clone();
+
+            let task = tokio::spawn(async move {
+                // Add small delay to be respectful to the API
+                tokio::time::sleep(Duration::from_millis(rand::random::<u64>() % 200)).await;
+                
+                Self::search_jobs_for_board_static(&client, &board_token, &keyword, &location).await
+            });
             
-            match self.search_jobs_for_board(board_token, keyword, location).await {
-                Ok(jobs) => {
+            tasks.push(task);
+        }
+
+        // Wait for all tasks to complete and collect results
+        let mut all_jobs = Vec::new();
+        let mut completed = 0;
+        
+        for task in tasks {
+            completed += 1;
+            print!("\rProgress: {}/{} companies completed", completed, total_boards);
+            
+            match task.await {
+                Ok(Ok(jobs)) => {
                     all_jobs.extend(jobs);
                 }
+                Ok(Err(e)) => {
+                    eprintln!("\n⚠️  Error in search task: {}", e);
+                }
                 Err(e) => {
-                    eprintln!("\n⚠️  Error searching {}: {}", board_token, e);
+                    eprintln!("\n⚠️  Task join error: {}", e);
                 }
             }
-
-            // Add small delay to be respectful to the API
-            tokio::time::sleep(Duration::from_millis(100)).await;
         }
 
         println!("\n");
